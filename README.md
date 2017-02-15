@@ -23,7 +23,16 @@ This extension allows to inject some JavaScript if:
  3. load Firebug Lite in a mobile browser like iPad and iPhone
  4. add a <img> tag pointing to a SMB share in order to capture NTLM hashes
 
+# Installation
 
-# Credit
+In order to use burp extensions, burpsuite expects you to import a .jar file. In order to generate a jar file you can use maven and run the following command
+
+```
+mvn clean install
+```
+
+This will create a `target` directory which will contain a .zip file wich you can then import into burpsuits _extensions_ tab.
+
+# Credits
 
 This project started out as a java conversion of the python equivalent I came across at  [https://github.com/libcrack/pentest/blob/master/burpsuite/extensions/HTTPInjector.py].
