@@ -26,7 +26,7 @@ import java.util.List;
  * code						- 	Value in response that should be inserted in place of marker
  * 
  */
-public class BurpExtender implements IBurpExtender, IProxyListener{
+public class BurpExtender implements IBurpExtender, IProxyListener, IExtensionStateListener{
 	
 	private String mimeType = "HTML";
 	private DuplicateType duplicates = DuplicateType.EVERY;
@@ -47,7 +47,6 @@ public class BurpExtender implements IBurpExtender, IProxyListener{
 	private Logger logger;
 	private IBurpExtenderCallbacks callbacks;
 	private IExtensionHelpers helpers;
-	private boolean verbose = true;
 	private List<String> infectedHosts = new ArrayList<String>();
 	private enum DuplicateType {
 		EVERY,
@@ -66,10 +65,13 @@ public class BurpExtender implements IBurpExtender, IProxyListener{
         callbacks.setExtensionName("Replace response content with alternative data");
         callbacks.registerProxyListener(this);
 	}
+	
+	public void extensionUnloaded() {
+		logger.info("Extension was unloaded");
+	}
 
 	public void processProxyMessage(final boolean isRequest, final IInterceptedProxyMessage message) 
-	{
-		
+	{		
 		if (isRequest)
 			return;
 		
@@ -78,72 +80,87 @@ public class BurpExtender implements IBurpExtender, IProxyListener{
 
 		byte[] response = message.getMessageInfo().getResponse();
 		IResponseInfo parsedResponse = helpers.analyzeResponse(response);
-
+		List<String> responseHeaders = parsedResponse.getHeaders();
+		String responseBody = helpers.bytesToString(response).substring(parsedResponse.getBodyOffset());
+		
 		IHttpRequestResponse request = message.getMessageInfo();
 		IRequestInfo parsedRequest = helpers.analyzeRequest(request);
 		
-		// if needed, do not process out of scope messages
-		if (messageInScope(parsedRequest)) {
-			if (verbose)
-				logger.info("[-] #%d (%s) Response was NOT infected (not in scope)", messageRef, clientIp);
+		if(!messageInScopeAndTargetedMime(parsedRequest, parsedResponse, messageRef, clientIp))
+			return;
 
+		if(isDuplicate(message, clientIp, messageRef, parsedRequest))
+			return;
+		
+		if (!responseBody.contains(marker)){
+			logger.info("[-] #%d (%s) Response was NOT infected (no marker in body)", messageRef, clientIp );
 			return;
 		}
 		
-		if (!messageIsTargetedMime(parsedResponse)) {
-			if (verbose)
-				logger.info("[!] #%d (%s) Response was NOT infected (MIME type != '%s') ", messageRef,  clientIp, mimeType);
-
-			return;
-		}
-
-		String sig = "";
-		switch (duplicates) {
-			case EVERY: // infect every request
-				break;
-			case BY_IP:
-				sig = clientIp;
-				break;
-			case BY_IP_AND_SERVICE:
-				IHttpService service = message.getMessageInfo().getHttpService();
-				sig = clientIp + "||" + service.getProtocol() + "://" + service.getHost() + ":" + service.getPort();
-			break;
-			case BY_IP_AND_URL:
-				sig = clientIp + "||" + parsedRequest.getUrl();
-			break;
-			default:
-				throw new RuntimeException("Invalid valid for duplicates supplied");
-		}
-		
-		if ( !duplicates.equals(DuplicateType.EVERY)  && ( infectedHosts.contains(sig) ) ){
-			if (verbose)
-				logger.info("[-] #%d (%s) Response was NOT infected (already infected)", messageRef, clientIp );
-			
-			return;
-		}
-		
-		// extract the body and headers
-		List<String> headers = parsedResponse.getHeaders();
-		String body = helpers.bytesToString(response).substring(parsedResponse.getBodyOffset());
-		
-		// infect only if the marker is found in the body
-		if (!body.contains(marker)){
-			if (verbose)
-				logger.info("[-] #%d (%s) Response was NOT infected (no marker in body)", messageRef, clientIp );
-
-			return;
-		}
-		
-		// update the response (will also update the Content-Length header)
-		message.getMessageInfo().setResponse(getUpdatedResponse(headers, body));
-		
-		infectedHosts.add(sig);
+		message.getMessageInfo().setResponse( getUpdatedResponse(responseHeaders, responseBody) );
 		logger.info("[+] #%d (%s) Response was infected! %s", messageRef, clientIp, parsedRequest.getUrl());
 		
 		// tag the message in Proxy / History
 		message.getMessageInfo().setComment(String.format("Source '%s' was infected!", clientIp));
 		message.getMessageInfo().setHighlight("yellow");
 		
+	}
+
+	// Test if message should be treated as a duplicate and discarded
+	private boolean isDuplicate(final IInterceptedProxyMessage message, 
+								final String clientIp, 
+								final int messageRef,
+								final IRequestInfo parsedRequest) {
+		
+		final String sourceSignature;
+		switch (duplicates) {
+			case EVERY: 
+				
+				logger.info("[-] #%d (%s) Response will be infected (every response will be infected)", messageRef, clientIp );
+				return false;
+				
+			case BY_IP:
+				
+				return infectedHosts.contains(clientIp);
+			
+			case BY_IP_AND_SERVICE:
+				
+				IHttpService service = message.getMessageInfo().getHttpService();
+				sourceSignature = clientIp + "||" + service.getProtocol() + "://" + service.getHost() + ":" + service.getPort();
+				break;
+			case BY_IP_AND_URL:
+			
+				sourceSignature = clientIp + "||" + parsedRequest.getUrl();
+			
+				break;
+			default:
+			
+				throw new RuntimeException("Invalid value for duplicates supplied");
+				
+		}
+		
+		if ( infectedHosts.contains(sourceSignature) ){
+			logger.info("[-] #%d (%s) Response will NOT be infected (already infected)", messageRef, clientIp );
+			return true;
+		}
+		
+		infectedHosts.add(sourceSignature);
+		return false;
+	}
+
+	private boolean messageInScopeAndTargetedMime(IRequestInfo parsedRequest, IResponseInfo parsedResponse, int messageRef, String clientIp) {
+		// if needed, do not process out of scope messages
+		if (!messageInScope(parsedRequest)) {
+			logger.info("[-] #%d (%s) Response was NOT infected (not in scope)", messageRef, clientIp);
+			return false;
+		}
+
+		if (!messageIsTargetedMime(parsedResponse)) {
+			logger.info("[!] #%d (%s) Response was NOT infected (MIME type != '%s') ", messageRef, clientIp, mimeType);
+			return false;
+		}
+		
+		return true;
 	}
 
 	private byte[] getUpdatedResponse(List<String> messageHeaders, String messageBody) {
@@ -160,5 +177,7 @@ public class BurpExtender implements IBurpExtender, IProxyListener{
 	private boolean messageIsTargetedMime(IResponseInfo parsedResponse) {
 		return parsedResponse.getInferredMimeType().equalsIgnoreCase(mimeType);
 	}
+
+	
 	
 }
